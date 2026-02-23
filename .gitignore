@@ -1,0 +1,62 @@
+# === Dependencies ===
+node_modules/
+
+# === OS ===
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# === IDE / Editor ===
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# === Environment & Secrets ===
+.env
+.env.*
+.env*.local
+*.pem
+*.key
+*.p8
+*.p12
+*.jks
+*.mobileprovision
+*.keystore
+credentials.json
+serviceAccountKey.json
+secrets/
+
+# === Claude Code ===
+.claude/
+
+# === Expo / React Native ===
+app/.expo/
+app/dist/
+app/web-build/
+app/expo-env.d.ts
+app/.kotlin/
+app/*.orig.*
+app/.metro-health-check*
+app/ios/
+app/android/
+
+# === Cloudflare Worker ===
+worker/.wrangler/
+worker/.dev.vars
+
+# === Build / Cache ===
+*.tsbuildinfo
+dist/
+build/
+.cache/
+
+# === Debug logs ===
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# === Package lock files (keep but noting) ===
+# package-lock.json files are committed for reproducibility

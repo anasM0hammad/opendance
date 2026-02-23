@@ -1,0 +1,8 @@
+name = "opendance-worker"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Set these via: wrangler secret put KLING_ACCESS_KEY / KLING_SECRET_KEY
+# [vars]
+# KLING_ACCESS_KEY = ""
+# KLING_SECRET_KEY = ""

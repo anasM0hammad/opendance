@@ -1,0 +1,53 @@
+{
+  "expo": {
+    "name": "OpenDance",
+    "slug": "opendance",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "opendance",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#000000"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#000000"
+      },
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "READ_MEDIA_VIDEO",
+        "READ_MEDIA_IMAGES"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "OpenDance needs camera access to capture photos for video generation."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "OpenDance needs access to your photos to select images for video generation."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "OpenDance needs access to save generated videos to your gallery.",
+          "savePhotosPermission": "OpenDance needs access to save generated videos to your gallery."
+        }
+      ]
+    ]
+  }
+}
