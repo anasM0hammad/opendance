@@ -236,7 +236,13 @@ export default function MainScreen() {
             <TouchableOpacity style={styles.captureBtn} onPress={takePicture}>
               <View style={styles.captureBtnInner} />
             </TouchableOpacity>
-            <View style={{ width: 60 }} />
+            {getLastClip()?.lastFrameUri ? (
+              <TouchableOpacity style={styles.lastFrameCameraBtn} onPress={useLastFrame}>
+                <Text style={styles.lastFrameCameraBtnText}>Last{'\n'}Frame</Text>
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.cameraControlSpacer} />
+            )}
           </View>
         </CameraView>
       </SafeAreaView>
@@ -251,7 +257,7 @@ export default function MainScreen() {
 
     return (
       <SafeAreaView style={styles.container}>
-        <ScrollView contentContainerStyle={styles.promptContainer}>
+        <ScrollView style={styles.promptScroll} contentContainerStyle={styles.promptContainer} keyboardShouldPersistTaps="handled">
           <Text style={styles.title}>
             {isFirstClip ? 'Describe the scene' : `Clip ${clips.filter((c) => c.status === 'done').length + 1}`}
           </Text>
@@ -259,7 +265,7 @@ export default function MainScreen() {
           {/* Image preview */}
           {selectedImageUri && (
             <View style={styles.imagePreviewContainer}>
-              <Image source={{ uri: selectedImageUri }} style={styles.imagePreview} />
+              <Image source={{ uri: selectedImageUri }} style={styles.imagePreview} resizeMode="contain" />
               {usingLastFrame && (
                 <View style={styles.lastFrameBadge}>
                   <Text style={styles.lastFrameBadgeText}>Last frame</Text>
@@ -271,8 +277,8 @@ export default function MainScreen() {
           {/* Change image options */}
           <View style={styles.imageOptions}>
             {!isFirstClip && !usingLastFrame && lastClip?.lastFrameUri && (
-              <TouchableOpacity style={styles.smallBtn} onPress={useLastFrame}>
-                <Text style={styles.smallBtnText}>Use last frame</Text>
+              <TouchableOpacity style={styles.highlightedSmallBtn} onPress={useLastFrame}>
+                <Text style={styles.highlightedSmallBtnText}>Use last frame</Text>
               </TouchableOpacity>
             )}
             <TouchableOpacity
@@ -291,7 +297,7 @@ export default function MainScreen() {
           {/* Context hint */}
           {!isFirstClip && (
             <View style={styles.contextHint}>
-              <Text style={styles.contextHintText}>
+              <Text style={styles.contextHintText} numberOfLines={2}>
                 Previous: "{lastClip?.prompt}"
               </Text>
             </View>
@@ -305,9 +311,10 @@ export default function MainScreen() {
             value={prompt}
             onChangeText={setPrompt}
             multiline
-            autoFocus
           />
+        </ScrollView>
 
+        <View style={styles.promptFooter}>
           <TouchableOpacity
             style={[styles.button, !prompt.trim() && styles.buttonDisabled]}
             onPress={startGeneration}
@@ -315,7 +322,7 @@ export default function MainScreen() {
           >
             <Text style={styles.buttonText}>Generate Video</Text>
           </TouchableOpacity>
-        </ScrollView>
+        </View>
       </SafeAreaView>
     );
   }
@@ -332,7 +339,7 @@ export default function MainScreen() {
               style={styles.genPreviewImage}
             />
           )}
-          <ActivityIndicator size="large" color="#fff" style={{ marginTop: 24 }} />
+          <ActivityIndicator size="large" color="#fff" style={styles.genSpinner} />
           <Text style={styles.genStatusText}>{genStatus}</Text>
           <Text style={styles.genHintText}>
             This usually takes 30-90 seconds
@@ -352,11 +359,11 @@ export default function MainScreen() {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.previewContainer}>
-        <Text style={styles.title}>
-          {doneClips.length === 1
-            ? 'Your clip'
-            : `Playing clip ${currentPlayingIndex + 1} of ${doneClips.length}`}
-        </Text>
+        {doneClips.length > 1 && (
+          <Text style={styles.clipCounter}>
+            Clip {currentPlayingIndex + 1} of {doneClips.length}
+          </Text>
+        )}
 
         {/* Video player */}
         {/* Issue 8 fix: key prop forces React to unmount/remount the Video
@@ -404,19 +411,18 @@ export default function MainScreen() {
           </ScrollView>
         )}
 
-        {/* Actions */}
+        {/* Primary action */}
+        <TouchableOpacity style={[styles.button, styles.previewPrimaryBtn]} onPress={handleAddNextClip}>
+          <Text style={styles.buttonText}>+ Next Clip</Text>
+        </TouchableOpacity>
+
+        {/* Secondary actions */}
         <View style={styles.previewActions}>
           {doneClips.length > 1 && (
             <TouchableOpacity style={styles.secondaryBtn} onPress={playAll}>
               <Text style={styles.secondaryBtnText}>Play All</Text>
             </TouchableOpacity>
           )}
-          <TouchableOpacity style={styles.button} onPress={handleAddNextClip}>
-            <Text style={styles.buttonText}>+ Next Clip</Text>
-          </TouchableOpacity>
-        </View>
-
-        <View style={styles.previewActions}>
           {currentClip?.videoUri && (
             <TouchableOpacity
               style={styles.secondaryBtn}
@@ -425,22 +431,24 @@ export default function MainScreen() {
               <Text style={styles.secondaryBtnText}>Save to Gallery</Text>
             </TouchableOpacity>
           )}
-          <TouchableOpacity
-            style={styles.dangerBtn}
-            onPress={() => {
-              Alert.alert('Start Over', 'This will clear all clips.', [
-                { text: 'Cancel', style: 'cancel' },
-                {
-                  text: 'Start Over',
-                  style: 'destructive',
-                  onPress: () => reset(),
-                },
-              ]);
-            }}
-          >
-            <Text style={styles.dangerBtnText}>Start Over</Text>
-          </TouchableOpacity>
         </View>
+
+        {/* Destructive action — visually separated */}
+        <TouchableOpacity
+          style={styles.startOverBtn}
+          onPress={() => {
+            Alert.alert('Start Over', 'This will clear all clips.', [
+              { text: 'Cancel', style: 'cancel' },
+              {
+                text: 'Start Over',
+                style: 'destructive',
+                onPress: () => reset(),
+              },
+            ]);
+          }}
+        >
+          <Text style={styles.startOverBtnText}>Start Over</Text>
+        </TouchableOpacity>
       </View>
     </SafeAreaView>
   );
@@ -526,11 +534,35 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 14,
   },
+  lastFrameCameraBtn: {
+    backgroundColor: 'rgba(100,50,255,0.5)',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 20,
+  },
+  lastFrameCameraBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 16,
+  },
+  cameraControlSpacer: {
+    width: 60,
+  },
 
   // Prompt
+  promptScroll: {
+    flex: 1,
+  },
   promptContainer: {
     padding: 20,
     paddingTop: 16,
+    paddingBottom: 8,
+  },
+  promptFooter: {
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    backgroundColor: '#000',
   },
   imagePreviewContainer: {
     alignItems: 'center',
@@ -571,6 +603,19 @@ const styles = StyleSheet.create({
   smallBtnText: {
     color: '#aaa',
     fontSize: 13,
+  },
+  highlightedSmallBtn: {
+    backgroundColor: 'rgba(100,50,255,0.25)',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(100,50,255,0.5)',
+  },
+  highlightedSmallBtnText: {
+    color: '#b399ff',
+    fontSize: 13,
+    fontWeight: '600',
   },
   contextHint: {
     backgroundColor: '#111',
@@ -621,39 +666,37 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
-  dangerBtn: {
-    flex: 1,
-    backgroundColor: 'transparent',
-    borderWidth: 1,
-    borderColor: '#444',
-    paddingVertical: 14,
-    borderRadius: 12,
+  startOverBtn: {
+    marginTop: 16,
     alignItems: 'center',
+    paddingVertical: 12,
   },
-  dangerBtnText: {
-    color: '#888',
-    fontSize: 14,
+  startOverBtnText: {
+    color: '#666',
+    fontSize: 13,
   },
   cancelBtn: {
     marginTop: 24,
     paddingHorizontal: 32,
-    paddingVertical: 12,
+    paddingVertical: 14,
     borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#666',
+    backgroundColor: '#222',
   },
   cancelBtnText: {
-    color: '#ccc',
+    color: '#fff',
     fontSize: 15,
     fontWeight: '600',
   },
 
   // Generating
   genPreviewImage: {
-    width: SCREEN_WIDTH * 0.6,
-    height: SCREEN_WIDTH * 0.6 * 0.75,
+    width: SCREEN_WIDTH * 0.8,
+    height: SCREEN_WIDTH * 0.8 * 0.75,
     borderRadius: 12,
     backgroundColor: '#111',
+  },
+  genSpinner: {
+    marginTop: 24,
   },
   genStatusText: {
     color: '#fff',
@@ -678,17 +721,23 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: '#111',
   },
+  clipCounter: {
+    color: '#888',
+    fontSize: 13,
+    textAlign: 'center',
+    marginBottom: 8,
+  },
   thumbnailStrip: {
     marginTop: 12,
-    maxHeight: 72,
+    maxHeight: 80,
   },
   thumbnailStripContent: {
     gap: 8,
     paddingHorizontal: 4,
   },
   thumbnail: {
-    width: 56,
-    height: 56,
+    width: 68,
+    height: 68,
     borderRadius: 8,
     overflow: 'hidden',
     borderWidth: 2,
@@ -708,6 +757,9 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 10,
     fontWeight: '700',
+  },
+  previewPrimaryBtn: {
+    marginTop: 12,
   },
   previewActions: {
     flexDirection: 'row',
