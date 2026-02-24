@@ -1,21 +1,44 @@
 import { File, Paths } from 'expo-file-system';
 
-// Point this to your Cloudflare Worker URL
+// Issue 15 fix: Use EXPO_PUBLIC_WORKER_URL env var for production builds.
+// Fails loudly at startup if not configured, preventing silent connection failures.
 const WORKER_URL = __DEV__
   ? 'http://10.0.2.2:8787' // Android emulator -> host machine
-  : 'https://opendance-worker.YOUR_SUBDOMAIN.workers.dev'; // Replace after deploy
+  : (() => {
+      const url = process.env.EXPO_PUBLIC_WORKER_URL;
+      if (!url) throw new Error('EXPO_PUBLIC_WORKER_URL must be set for production builds');
+      return url;
+    })();
 
-function uint8ArrayToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
+// Issue 10 (app-side): Send API key header if configured.
+// Set EXPO_PUBLIC_APP_API_KEY in your .env for production builds.
+const APP_API_KEY = process.env.EXPO_PUBLIC_APP_API_KEY || '';
+
+function getAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (APP_API_KEY) {
+    headers['X-API-Key'] = APP_API_KEY;
   }
-  return btoa(binary);
+  return headers;
+}
+
+// Issue 9 fix: Process in chunks to avoid O(n^2) string concatenation.
+// Each chunk builds a substring from a slice of the Uint8Array, then all
+// chunks are joined once before base64 encoding.
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  const CHUNK_SIZE = 8192;
+  const chunks: string[] = [];
+  for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+    const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.length));
+    chunks.push(String.fromCharCode(...chunk));
+  }
+  return btoa(chunks.join(''));
 }
 
 export async function generateVideo(
   imageUri: string,
   prompt: string,
+  signal?: AbortSignal,
 ): Promise<{ taskId: string }> {
   // Read image as base64
   const file = new File(imageUri);
@@ -24,8 +47,9 @@ export async function generateVideo(
 
   const response = await fetch(`${WORKER_URL}/generate`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders(),
     body: JSON.stringify({ image: base64, prompt }),
+    signal,
   });
 
   if (!response.ok) {
@@ -38,8 +62,17 @@ export async function generateVideo(
 
 export async function checkStatus(
   taskId: string,
+  signal?: AbortSignal,
 ): Promise<{ status: string; videoUrl?: string }> {
-  const response = await fetch(`${WORKER_URL}/status/${taskId}`);
+  const headers: Record<string, string> = {};
+  if (APP_API_KEY) {
+    headers['X-API-Key'] = APP_API_KEY;
+  }
+
+  const response = await fetch(`${WORKER_URL}/status/${taskId}`, {
+    headers,
+    signal,
+  });
 
   if (!response.ok) {
     throw new Error('Status check failed');
@@ -57,18 +90,49 @@ export async function downloadVideo(
   return downloaded.uri;
 }
 
-// Poll until video is ready, returns the Kling video URL
+// Issue 3 fix: Added 5-minute timeout and AbortSignal support.
+// The polling loop now exits on timeout, cancellation, or failure instead
+// of spinning indefinitely.
+const MAX_POLL_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+
 export async function pollUntilDone(
   taskId: string,
   onStatusUpdate?: (status: string) => void,
+  signal?: AbortSignal,
 ): Promise<string> {
   let delay = 3000; // Start at 3s
   const maxDelay = 10000; // Cap at 10s
+  const startTime = Date.now();
 
   while (true) {
-    await new Promise((r) => setTimeout(r, delay));
+    // Check cancellation before sleeping
+    if (signal?.aborted) {
+      throw new Error('Generation cancelled');
+    }
 
-    const result = await checkStatus(taskId);
+    // Check timeout
+    if (Date.now() - startTime > MAX_POLL_TIMEOUT) {
+      throw new Error('Generation timed out — please try again');
+    }
+
+    // Cancellable sleep: resolves on timeout OR abort signal
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, delay);
+      if (signal) {
+        const onAbort = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+
+    // Check cancellation after sleeping
+    if (signal?.aborted) {
+      throw new Error('Generation cancelled');
+    }
+
+    const result = await checkStatus(taskId, signal);
     onStatusUpdate?.(result.status);
 
     if (result.status === 'completed' && result.videoUrl) {
