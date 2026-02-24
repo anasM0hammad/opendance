@@ -1,6 +1,10 @@
 interface Env {
   KLING_ACCESS_KEY: string;
   KLING_SECRET_KEY: string;
+  // Issue 10: Optional API key for client authentication.
+  // Set via: wrangler secret put APP_API_KEY
+  // If not set, auth is skipped (for local dev convenience).
+  APP_API_KEY?: string;
 }
 
 const KLING_BASE = 'https://api.klingai.com';
@@ -41,6 +45,43 @@ async function generateJWT(accessKey: string, secretKey: string): Promise<string
   return `${signingInput}.${base64url(sig)}`;
 }
 
+// --- Issue 10: API Key Validation ---
+// Validates X-API-Key header against APP_API_KEY secret.
+// If APP_API_KEY is not configured, auth is skipped (local dev).
+// NOTE: This is a basic speed bump. For production, also add rate limiting
+// via Cloudflare's built-in rate limiting or Durable Objects.
+
+function validateApiKey(request: Request, env: Env): Response | null {
+  if (!env.APP_API_KEY) return null; // Auth not configured — skip
+  const key = request.headers.get('X-API-Key');
+  if (key !== env.APP_API_KEY) {
+    return Response.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  return null; // Auth passed
+}
+
+// --- Issue 11: Detect image MIME type and ensure data URI prefix ---
+
+function ensureDataUri(base64Image: string): string {
+  // Already has data URI prefix — return as-is
+  if (base64Image.startsWith('data:')) {
+    return base64Image;
+  }
+
+  // Detect format from base64-decoded first bytes
+  // JPEG starts with /9j/ in base64 (0xFF 0xD8), PNG starts with iVBOR (0x89 0x50)
+  let mimeType = 'image/jpeg'; // Default to JPEG
+  if (base64Image.startsWith('iVBOR')) {
+    mimeType = 'image/png';
+  } else if (base64Image.startsWith('R0lGOD')) {
+    mimeType = 'image/gif';
+  } else if (base64Image.startsWith('UklGR')) {
+    mimeType = 'image/webp';
+  }
+
+  return `data:${mimeType};base64,${base64Image}`;
+}
+
 // --- Route Handlers ---
 
 async function handleGenerate(request: Request, env: Env): Promise<Response> {
@@ -52,6 +93,9 @@ async function handleGenerate(request: Request, env: Env): Promise<Response> {
 
   const token = await generateJWT(env.KLING_ACCESS_KEY, env.KLING_SECRET_KEY);
 
+  // Issue 11 fix: Ensure the image has a data URI prefix for Kling API compatibility
+  const imageData = ensureDataUri(body.image);
+
   const klingResponse = await fetch(`${KLING_BASE}/v1/videos/image2video`, {
     method: 'POST',
     headers: {
@@ -60,7 +104,7 @@ async function handleGenerate(request: Request, env: Env): Promise<Response> {
     },
     body: JSON.stringify({
       model_name: 'kling-v2-6',
-      image: body.image, // base64 string
+      image: imageData,
       prompt: body.prompt,
       duration: '5',
       mode: 'std',
@@ -140,11 +184,13 @@ async function handleStatus(taskId: string, env: Env): Promise<Response> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // CORS headers for dev
+    // CORS headers — kept permissive because the primary client is a native
+    // mobile app (CORS is a browser-only concept). The X-API-Key header is
+    // the actual access control mechanism.
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',
     };
 
     if (request.method === 'OPTIONS') {
@@ -156,7 +202,11 @@ export default {
     let response: Response;
 
     try {
-      if (url.pathname === '/generate' && request.method === 'POST') {
+      // Issue 10: Validate API key before processing any route
+      const authError = validateApiKey(request, env);
+      if (authError) {
+        response = authError;
+      } else if (url.pathname === '/generate' && request.method === 'POST') {
         response = await handleGenerate(request, env);
       } else if (url.pathname.startsWith('/status/')) {
         const taskId = url.pathname.split('/status/')[1];

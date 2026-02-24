@@ -15,7 +15,9 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as MediaLibrary from 'expo-media-library';
-import { Video, ResizeMode } from 'expo-av';
+// Issue 12 fix: Import only Video — use string literal for resizeMode
+// to avoid depending on the potentially deprecated ResizeMode enum.
+import { Video } from 'expo-av';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useClipStore, type Phase } from '../store/useClipStore';
 import { generateVideo, pollUntilDone, downloadVideo } from '../services/api';
@@ -25,10 +27,17 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 export default function MainScreen() {
   const cameraRef = useRef<CameraView>(null);
   const videoRef = useRef<Video>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [prompt, setPrompt] = useState('');
   const [genStatus, setGenStatus] = useState('Starting...');
   const [currentPlayingIndex, setCurrentPlayingIndex] = useState(0);
+  // Issue 7 fix: playbackKey forces Video remount when "Play All" is pressed
+  // while already at index 0, which would otherwise be a no-op.
+  const [playbackKey, setPlaybackKey] = useState(0);
+  // Issue 14 fix: Track camera readiness to show a loading indicator
+  // while the camera stream initializes.
+  const [cameraReady, setCameraReady] = useState(false);
 
   const {
     clips,
@@ -50,9 +59,11 @@ export default function MainScreen() {
     }
   }, []);
 
+  // Issue 16 fix: Reduced image quality from 0.7 to 0.5 to lower memory
+  // usage during base64 encoding and speed up uploads.
   const takePicture = useCallback(async () => {
     if (!cameraRef.current) return;
-    const photo = await cameraRef.current.takePictureAsync({ quality: 0.7 });
+    const photo = await cameraRef.current.takePictureAsync({ quality: 0.5 });
     if (photo) {
       setSelectedImage(photo.uri);
       setPhase('prompt');
@@ -62,7 +73,7 @@ export default function MainScreen() {
   const pickFromGallery = useCallback(async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
-      quality: 0.7,
+      quality: 0.5,
     });
     if (!result.canceled && result.assets[0]) {
       setSelectedImage(result.assets[0].uri);
@@ -81,6 +92,10 @@ export default function MainScreen() {
   const startGeneration = useCallback(async () => {
     if (!selectedImageUri || !prompt.trim()) return;
 
+    // Issue 4 fix: Create an AbortController so the user can cancel generation
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     const fullPrompt = getContextPrompt(prompt.trim());
     const clipId = addClip(selectedImageUri, prompt.trim());
     setPhase('generating');
@@ -89,16 +104,16 @@ export default function MainScreen() {
     try {
       // 1. Call worker to start generation
       setGenStatus('Starting generation...');
-      const { taskId } = await generateVideo(selectedImageUri, fullPrompt);
+      const { taskId } = await generateVideo(selectedImageUri, fullPrompt, controller.signal);
       updateClip(clipId, { klingTaskId: taskId });
 
-      // 2. Poll until done
+      // 2. Poll until done (with timeout and abort support — Issue 3)
       setGenStatus('Generating video...');
       const videoUrl = await pollUntilDone(taskId, (status) => {
         setGenStatus(
           status === 'processing' ? 'Generating video...' : status,
         );
-      });
+      }, controller.signal);
 
       // 3. Download video to device
       setGenStatus('Downloading video...');
@@ -116,14 +131,30 @@ export default function MainScreen() {
       });
 
       setPrompt('');
-      setCurrentPlayingIndex(clips.length); // Play the new clip
+      // Issue 1 fix: Read the latest clip count from the store directly
+      // instead of using the stale `clips.length` from the closure.
+      const latestDoneClips = useClipStore.getState().clips.filter(
+        (c) => c.status === 'done',
+      );
+      setCurrentPlayingIndex(latestDoneClips.length - 1);
       setPhase('preview');
     } catch (error) {
       updateClip(clipId, { status: 'failed' });
-      Alert.alert('Error', error instanceof Error ? error.message : 'Generation failed');
+      // Don't show an alert if the user intentionally cancelled
+      if (!controller.signal.aborted) {
+        Alert.alert('Error', error instanceof Error ? error.message : 'Generation failed');
+      }
       setPhase('prompt');
+    } finally {
+      abortControllerRef.current = null;
     }
-  }, [selectedImageUri, prompt, getContextPrompt, addClip, updateClip, clips.length]);
+  }, [selectedImageUri, prompt, getContextPrompt, addClip, updateClip]);
+
+  // Issue 4 fix: Cancel handler aborts the in-flight generation and
+  // returns to the prompt phase.
+  const cancelGeneration = useCallback(() => {
+    abortControllerRef.current?.abort();
+  }, []);
 
   const handleAddNextClip = useCallback(() => {
     const last = getLastClip();
@@ -154,8 +185,11 @@ export default function MainScreen() {
     }
   }, [clips, currentPlayingIndex]);
 
+  // Issue 7 fix: Increment playbackKey to force Video remount even when
+  // already at index 0, making "Play All" always restart from the beginning.
   const playAll = useCallback(() => {
     setCurrentPlayingIndex(0);
+    setPlaybackKey((k) => k + 1);
   }, []);
 
   // --- RENDER ---
@@ -177,7 +211,19 @@ export default function MainScreen() {
 
     return (
       <SafeAreaView style={styles.container}>
-        <CameraView ref={cameraRef} style={styles.camera} facing="back">
+        <CameraView
+          ref={cameraRef}
+          style={styles.camera}
+          facing="back"
+          onCameraReady={() => setCameraReady(true)}
+        >
+          {/* Issue 14 fix: Show loading indicator until camera stream is active */}
+          {!cameraReady && (
+            <View style={styles.cameraLoading}>
+              <ActivityIndicator size="large" color="#fff" />
+              <Text style={styles.cameraLoadingText}>Starting camera...</Text>
+            </View>
+          )}
           <View style={styles.cameraOverlay}>
             <Text style={styles.title}>
               {clips.length === 0 ? 'Capture your first scene' : 'Capture next scene'}
@@ -275,6 +321,7 @@ export default function MainScreen() {
   }
 
   // Generating phase
+  // Issue 4 fix: Added a Cancel button so the user is not trapped during generation.
   if (phase === 'generating') {
     return (
       <SafeAreaView style={styles.container}>
@@ -290,6 +337,9 @@ export default function MainScreen() {
           <Text style={styles.genHintText}>
             This usually takes 30-90 seconds
           </Text>
+          <TouchableOpacity style={styles.cancelBtn} onPress={cancelGeneration}>
+            <Text style={styles.cancelBtnText}>Cancel</Text>
+          </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
@@ -309,12 +359,16 @@ export default function MainScreen() {
         </Text>
 
         {/* Video player */}
+        {/* Issue 8 fix: key prop forces React to unmount/remount the Video
+            component when the clip changes, ensuring fresh playback.
+            Issue 7: playbackKey is included so "Play All" also forces a remount. */}
         {currentClip?.videoUri && (
           <Video
+            key={`${currentClip.id}-${playbackKey}`}
             ref={videoRef}
             source={{ uri: currentClip.videoUri }}
             style={styles.videoPlayer}
-            resizeMode={ResizeMode.CONTAIN}
+            resizeMode={"contain" as any}
             shouldPlay
             onPlaybackStatusUpdate={(status) => {
               if (status.isLoaded && status.didJustFinish) {
@@ -421,6 +475,18 @@ const styles = StyleSheet.create({
   // Camera
   camera: {
     flex: 1,
+  },
+  cameraLoading: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    zIndex: 10,
+  },
+  cameraLoadingText: {
+    color: '#fff',
+    fontSize: 14,
+    marginTop: 12,
   },
   cameraOverlay: {
     paddingTop: 20,
@@ -567,6 +633,19 @@ const styles = StyleSheet.create({
   dangerBtnText: {
     color: '#888',
     fontSize: 14,
+  },
+  cancelBtn: {
+    marginTop: 24,
+    paddingHorizontal: 32,
+    paddingVertical: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#666',
+  },
+  cancelBtnText: {
+    color: '#ccc',
+    fontSize: 15,
+    fontWeight: '600',
   },
 
   // Generating
