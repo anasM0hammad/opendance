@@ -40,8 +40,6 @@ app/expo-env.d.ts
 app/.kotlin/
 app/*.orig.*
 app/.metro-health-check*
-app/ios/
-app/android/
 
 # === Cloudflare Worker ===
 worker/.wrangler/
