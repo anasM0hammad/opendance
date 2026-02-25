@@ -1,5 +1,5 @@
 pluginManagement {
-  def nodeCommand = System.getenv("NODE_BINARY") ?: "/opt/node22/bin/node"
+  def nodeCommand = System.getenv("NODE_BINARY") ?: "/usr/local/bin/node"
 
   def reactNativeGradlePlugin = new File(
     providers.exec {
