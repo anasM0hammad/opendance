@@ -14,13 +14,15 @@ import {
   ScrollView,
   KeyboardAvoidingView,
   Platform,
+  BackHandler,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as MediaLibrary from 'expo-media-library';
 import { Video } from 'expo-av';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import { useClipStore, type Phase } from '../store/useClipStore';
 import { generateVideo, pollUntilDone, downloadVideo } from '../services/api';
 
@@ -195,12 +197,34 @@ const progressStyles = StyleSheet.create({
 });
 
 // ---------------------------------------------------------------------------
+// Back Button Component
+// ---------------------------------------------------------------------------
+function BackButton({
+  onPress,
+  topOffset,
+}: {
+  onPress: () => void;
+  topOffset: number;
+}) {
+  return (
+    <TouchableOpacity
+      style={[styles.backBtn, { top: topOffset }]}
+      onPress={onPress}
+      activeOpacity={0.7}
+    >
+      <Ionicons name="chevron-back" size={24} color="#fff" />
+    </TouchableOpacity>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main Screen
 // ---------------------------------------------------------------------------
 export default function MainScreen() {
   const cameraRef = useRef<CameraView>(null);
   const videoRef = useRef<Video>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const insets = useSafeAreaInsets();
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [cameraFacing, setCameraFacing] = useState<'front' | 'back'>('back');
   const [prompt, setPrompt] = useState('');
@@ -226,6 +250,8 @@ export default function MainScreen() {
     getContextPrompt,
     reset,
   } = useClipStore();
+
+  const hasDoneClips = clips.filter((c) => c.status === 'done').length > 0;
 
   // ---- Helpers ----
 
@@ -404,9 +430,69 @@ export default function MainScreen() {
     setPlaybackKey((k) => k + 1);
   }, []);
 
+  // ---- Back / hardware back ----
+
+  const handleBackPress = useCallback((): boolean => {
+    if (phase === 'camera') {
+      if (hasDoneClips) {
+        setPhase('preview');
+        return true;
+      }
+      return false; // let Android exit the app
+    }
+
+    if (phase === 'prompt') {
+      if (prompt.trim()) {
+        showModal('Discard Changes?', 'You have an unsaved scene description.', [
+          { text: 'Stay', onPress: () => {}, style: 'cancel' },
+          {
+            text: 'Discard',
+            onPress: () => {
+              setPrompt('');
+              setPhase('camera');
+            },
+            style: 'destructive',
+          },
+        ]);
+      } else {
+        setPhase('camera');
+      }
+      return true;
+    }
+
+    if (phase === 'generating') {
+      showModal(
+        'Cancel Generation?',
+        'The video is still being generated. Do you want to cancel?',
+        [
+          { text: 'Continue', onPress: () => {}, style: 'cancel' },
+          {
+            text: 'Cancel Generation',
+            onPress: cancelGeneration,
+            style: 'destructive',
+          },
+        ],
+      );
+      return true;
+    }
+
+    // Preview: let default handler work
+    return false;
+  }, [phase, hasDoneClips, prompt, showModal, cancelGeneration]);
+
+  useEffect(() => {
+    const sub = BackHandler.addEventListener(
+      'hardwareBackPress',
+      handleBackPress,
+    );
+    return () => sub.remove();
+  }, [handleBackPress]);
+
   // =======================================================================
   // RENDER
   // =======================================================================
+
+  const backBtnTop = insets.top + 10;
 
   // ---- Camera Phase ----
   if (phase === 'camera') {
@@ -445,25 +531,52 @@ export default function MainScreen() {
             </View>
           )}
 
-          {/* Top bar: title + flip button */}
+          {/* Top bar: optional back button + centered title */}
           <SafeAreaView style={styles.cameraTopBar}>
             <View style={styles.cameraTopBarInner}>
+              {hasDoneClips ? (
+                <TouchableOpacity
+                  style={styles.cameraTopBtn}
+                  onPress={() => handleBackPress()}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="chevron-back" size={22} color="#fff" />
+                </TouchableOpacity>
+              ) : (
+                <View style={styles.cameraTopBtnSpacer} />
+              )}
               <Text style={styles.cameraTitle}>
                 {clips.length === 0
                   ? 'Capture your first scene'
                   : 'Capture next scene'}
               </Text>
-              <TouchableOpacity
-                style={styles.flipBtn}
-                onPress={toggleCameraFacing}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.flipBtnIcon}>{'↻'}</Text>
-              </TouchableOpacity>
+              {/* Right spacer to balance the back button */}
+              <View style={styles.cameraTopBtnSpacer} />
             </View>
           </SafeAreaView>
 
-          {/* Bottom controls */}
+          {/* Last frame floating chip above controls */}
+          {getLastClip()?.lastFrameUri && (
+            <View style={styles.lastFrameFloatingRow}>
+              <TouchableOpacity
+                style={styles.lastFrameFloatingBtn}
+                onPress={useLastFrame}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.lastFrameFloatingBtnText}>
+                  Continue from last frame
+                </Text>
+                <Ionicons
+                  name="arrow-forward"
+                  size={14}
+                  color="#fff"
+                  style={{ marginLeft: 6 }}
+                />
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* Bottom controls: Gallery | Capture | Flip */}
           <View style={styles.cameraControls}>
             <TouchableOpacity
               style={styles.galleryBtn}
@@ -474,18 +587,13 @@ export default function MainScreen() {
             <TouchableOpacity style={styles.captureBtn} onPress={takePicture}>
               <View style={styles.captureBtnInner} />
             </TouchableOpacity>
-            {getLastClip()?.lastFrameUri ? (
-              <TouchableOpacity
-                style={styles.lastFrameCameraBtn}
-                onPress={useLastFrame}
-              >
-                <Text style={styles.lastFrameCameraBtnText}>
-                  Last{'\n'}Frame
-                </Text>
-              </TouchableOpacity>
-            ) : (
-              <View style={styles.cameraControlSpacer} />
-            )}
+            <TouchableOpacity
+              style={styles.flipBtn}
+              onPress={toggleCameraFacing}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="camera-reverse-outline" size={26} color="#fff" />
+            </TouchableOpacity>
           </View>
         </CameraView>
       </View>
@@ -505,7 +613,7 @@ export default function MainScreen() {
         style={styles.container}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
-        {/* Image — takes all remaining space */}
+        {/* Image — takes remaining space */}
         <View style={styles.promptImageSection}>
           {selectedImageUri && (
             <Image
@@ -514,17 +622,32 @@ export default function MainScreen() {
               resizeMode="cover"
             />
           )}
+
+          {/* Back button */}
+          <BackButton
+            onPress={() => handleBackPress()}
+            topOffset={backBtnTop}
+          />
+
           {usingLastFrame && (
-            <View style={styles.lastFrameBadge}>
+            <View style={[styles.lastFrameBadge, { top: backBtnTop }]}>
               <Text style={styles.lastFrameBadgeText}>Last frame</Text>
             </View>
           )}
-          {/* Overlay option chips on the image */}
+
+          {/* Overlay option chips on the image — well above the bottom section */}
           <View style={styles.imageOptionsOverlay}>
             <TouchableOpacity
               style={styles.imageOptionBtn}
               onPress={() => setPhase('camera')}
+              activeOpacity={0.7}
             >
+              <Ionicons
+                name="camera-outline"
+                size={15}
+                color="#fff"
+                style={{ marginRight: 6 }}
+              />
               <Text style={styles.imageOptionBtnText}>
                 {usingLastFrame ? 'Camera' : 'Retake'}
               </Text>
@@ -532,14 +655,28 @@ export default function MainScreen() {
             <TouchableOpacity
               style={styles.imageOptionBtn}
               onPress={pickFromGallery}
+              activeOpacity={0.7}
             >
+              <Ionicons
+                name="images-outline"
+                size={15}
+                color="#fff"
+                style={{ marginRight: 6 }}
+              />
               <Text style={styles.imageOptionBtnText}>Gallery</Text>
             </TouchableOpacity>
             {!isFirstClip && !usingLastFrame && lastClip?.lastFrameUri && (
               <TouchableOpacity
                 style={styles.imageOptionBtnHighlight}
                 onPress={useLastFrame}
+                activeOpacity={0.7}
               >
+                <Ionicons
+                  name="play-forward-outline"
+                  size={15}
+                  color="#fff"
+                  style={{ marginRight: 6 }}
+                />
                 <Text style={styles.imageOptionBtnHighlightText}>
                   Last Frame
                 </Text>
@@ -548,7 +685,7 @@ export default function MainScreen() {
           </View>
         </View>
 
-        {/* Bottom — prompt input + generate button */}
+        {/* Bottom — prompt text area + generate button */}
         <View style={styles.promptBottomSection}>
           <Text style={styles.promptTitle}>
             {isFirstClip
@@ -569,6 +706,7 @@ export default function MainScreen() {
             value={prompt}
             onChangeText={setPrompt}
             multiline
+            textAlignVertical="top"
           />
 
           <TouchableOpacity
@@ -603,6 +741,12 @@ export default function MainScreen() {
 
         {/* Semi-transparent overlay */}
         <View style={styles.genOverlay}>
+          {/* Back / cancel button top-left */}
+          <BackButton
+            onPress={() => handleBackPress()}
+            topOffset={backBtnTop}
+          />
+
           {/* Centered progress info */}
           <View style={styles.genCenter}>
             <Text style={styles.genStatusText}>{genStatus}</Text>
@@ -616,7 +760,7 @@ export default function MainScreen() {
           <SafeAreaView style={styles.genBottom}>
             <TouchableOpacity
               style={styles.genCancelBtn}
-              onPress={cancelGeneration}
+              onPress={() => handleBackPress()}
               activeOpacity={0.7}
             >
               <Text style={styles.genCancelBtnText}>Cancel</Text>
@@ -780,6 +924,19 @@ const styles = StyleSheet.create({
     padding: 32,
   },
 
+  // -- Back button --
+  backBtn: {
+    position: 'absolute',
+    left: 16,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10,
+  },
+
   // -- Permission screen --
   permissionTitle: {
     color: '#fff',
@@ -831,33 +988,59 @@ const styles = StyleSheet.create({
   },
   cameraTopBarInner: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 20,
+    paddingHorizontal: 16,
     paddingTop: 8,
+    height: 48,
+  },
+  cameraTopBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 2,
+  },
+  cameraTopBtnSpacer: {
+    width: 40,
   },
   cameraTitle: {
+    flex: 1,
     color: '#fff',
     fontSize: 17,
     fontWeight: '700',
-    flex: 1,
+    textAlign: 'center',
     textShadowColor: 'rgba(0,0,0,0.6)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 4,
   },
-  flipBtn: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    backgroundColor: 'rgba(255,255,255,0.18)',
-    justifyContent: 'center',
+
+  // Last frame floating chip (above camera controls)
+  lastFrameFloatingRow: {
+    position: 'absolute',
+    bottom: 130,
+    left: 0,
+    right: 0,
     alignItems: 'center',
   },
-  flipBtnIcon: {
+  lastFrameFloatingBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(100,50,255,0.6)',
+    paddingHorizontal: 20,
+    paddingVertical: 11,
+    borderRadius: 26,
+    borderWidth: 1,
+    borderColor: 'rgba(100,50,255,0.8)',
+  },
+  lastFrameFloatingBtnText: {
     color: '#fff',
-    fontSize: 26,
+    fontSize: 14,
     fontWeight: '600',
   },
+
+  // Camera bottom controls
   cameraControls: {
     position: 'absolute',
     bottom: 40,
@@ -866,6 +1049,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-around',
     alignItems: 'center',
+    paddingHorizontal: 24,
   },
   captureBtn: {
     width: 74,
@@ -887,27 +1071,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 11,
     borderRadius: 22,
+    minWidth: 64,
+    alignItems: 'center',
   },
   galleryBtnText: {
     color: '#fff',
     fontSize: 14,
     fontWeight: '500',
   },
-  lastFrameCameraBtn: {
-    backgroundColor: 'rgba(100,50,255,0.5)',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 22,
-  },
-  lastFrameCameraBtnText: {
-    color: '#fff',
-    fontSize: 12,
-    textAlign: 'center',
-    lineHeight: 16,
-    fontWeight: '500',
-  },
-  cameraControlSpacer: {
-    width: 64,
+  flipBtn: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 
   // -- Prompt --
@@ -921,7 +1099,6 @@ const styles = StyleSheet.create({
   },
   lastFrameBadge: {
     position: 'absolute',
-    top: 52,
     right: 16,
     backgroundColor: 'rgba(100,50,255,0.85)',
     paddingHorizontal: 12,
@@ -935,7 +1112,7 @@ const styles = StyleSheet.create({
   },
   imageOptionsOverlay: {
     position: 'absolute',
-    bottom: 12,
+    bottom: 30,
     left: 0,
     right: 0,
     flexDirection: 'row',
@@ -943,25 +1120,39 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   imageOptionBtn: {
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(20,20,20,0.7)',
     paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
+    paddingVertical: 10,
+    borderRadius: 22,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    borderColor: 'rgba(255,255,255,0.2)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
   },
   imageOptionBtnText: {
     color: '#fff',
     fontSize: 13,
-    fontWeight: '500',
+    fontWeight: '600',
   },
   imageOptionBtnHighlight: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: 'rgba(100,50,255,0.55)',
     paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
+    paddingVertical: 10,
+    borderRadius: 22,
     borderWidth: 1,
     borderColor: 'rgba(100,50,255,0.8)',
+    shadowColor: '#6432ff',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
   },
   imageOptionBtnHighlightText: {
     color: '#fff',
@@ -971,11 +1162,10 @@ const styles = StyleSheet.create({
   promptBottomSection: {
     backgroundColor: '#0a0a0a',
     paddingHorizontal: 16,
-    paddingTop: 14,
+    paddingTop: 16,
     paddingBottom: Platform.OS === 'ios' ? 32 : 18,
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
-    marginTop: -16,
   },
   promptTitle: {
     color: '#fff',
@@ -990,18 +1180,20 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   promptInput: {
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#151515',
     color: '#fff',
-    borderRadius: 18,
+    borderRadius: 16,
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingTop: 14,
+    paddingBottom: 14,
     fontSize: 15,
-    minHeight: 52,
-    maxHeight: 80,
+    minHeight: 90,
+    maxHeight: 130,
     textAlignVertical: 'top',
     marginBottom: 12,
     borderWidth: 1,
     borderColor: '#2a2a2a',
+    lineHeight: 22,
   },
   generateBtn: {
     backgroundColor: '#6432ff',
@@ -1082,7 +1274,7 @@ const styles = StyleSheet.create({
   },
   thumbnailStrip: {
     position: 'absolute',
-    top: 90,
+    top: 100,
     left: 0,
     right: 0,
     maxHeight: 54,
