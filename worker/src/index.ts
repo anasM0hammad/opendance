@@ -1,15 +1,115 @@
 interface Env {
-  KLING_ACCESS_KEY: string;
-  KLING_SECRET_KEY: string;
+  KLING_ACCESS_KEY?: string;
+  KLING_SECRET_KEY?: string;
   // Issue 10: Optional API key for client authentication.
   // Set via: wrangler secret put APP_API_KEY
   // If not set, auth is skipped (for local dev convenience).
   APP_API_KEY?: string;
 }
 
-const KLING_BASE = 'https://api.klingai.com';
+// ---------------------------------------------------------------------------
+// Dummy / real mode detection
+// ---------------------------------------------------------------------------
+// If Kling credentials are not configured, the worker automatically runs in
+// dummy mode — it simulates generation with a short delay and returns a
+// public sample video. No external API calls are made.
+//
+// To switch to real Kling integration, just set the secrets:
+//   wrangler secret put KLING_ACCESS_KEY
+//   wrangler secret put KLING_SECRET_KEY
+// ---------------------------------------------------------------------------
 
-// --- JWT Generation (HS256) for Kling API ---
+function isDummyMode(env: Env): boolean {
+  return !env.KLING_ACCESS_KEY || !env.KLING_SECRET_KEY;
+}
+
+// Publicly hosted sample video (Big Buck Bunny, Google CDN, ~2 MB)
+const DUMMY_VIDEO_URL =
+  'https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4';
+
+// How long the dummy "generation" takes before returning completed (ms)
+const DUMMY_DELAY_MS = 8_000;
+
+// ---------------------------------------------------------------------------
+// Dummy mode handlers
+// ---------------------------------------------------------------------------
+// The trick: encode the completion timestamp inside the taskId itself, so
+// the worker is fully stateless (no Map, no KV, no D1). Works correctly
+// even on Cloudflare's edge where each request may hit a different isolate.
+// ---------------------------------------------------------------------------
+
+async function handleGenerateDummy(request: Request): Promise<Response> {
+  const body = (await request.json()) as { image: string; prompt: string };
+
+  if (!body.image || !body.prompt) {
+    return Response.json(
+      { error: 'image and prompt required' },
+      { status: 400 },
+    );
+  }
+
+  const readyAt = Date.now() + DUMMY_DELAY_MS;
+  const taskId = `dummy_${readyAt}`;
+
+  console.log(
+    `[DUMMY] Generate requested — prompt="${body.prompt.slice(0, 60)}…" → taskId=${taskId}`,
+  );
+
+  return Response.json({ taskId });
+}
+
+function handleStatusDummy(taskId: string, workerOrigin: string): Response {
+  if (!taskId.startsWith('dummy_')) {
+    return Response.json({ error: 'Unknown task' }, { status: 404 });
+  }
+
+  const readyAt = parseInt(taskId.split('dummy_')[1], 10);
+
+  if (isNaN(readyAt)) {
+    return Response.json({ error: 'Invalid task ID' }, { status: 400 });
+  }
+
+  if (Date.now() < readyAt) {
+    console.log(
+      `[DUMMY] Status check — ${Math.ceil((readyAt - Date.now()) / 1000)}s remaining`,
+    );
+    return Response.json({ status: 'processing' });
+  }
+
+  console.log('[DUMMY] Status check — completed, returning video URL');
+  return Response.json({
+    status: 'completed',
+    // Serve through the worker's own /dummy-video endpoint to avoid any
+    // potential download issues with external URLs on certain networks.
+    videoUrl: `${workerOrigin}/dummy-video`,
+  });
+}
+
+// Proxy the sample video through the worker so the app always downloads
+// from the same origin. Cloudflare streams the body — no buffering.
+async function handleDummyVideo(): Promise<Response> {
+  const upstream = await fetch(DUMMY_VIDEO_URL);
+
+  if (!upstream.ok) {
+    return Response.json(
+      { error: 'Failed to fetch sample video' },
+      { status: 502 },
+    );
+  }
+
+  return new Response(upstream.body, {
+    headers: {
+      'Content-Type': 'video/mp4',
+      'Cache-Control': 'public, max-age=86400',
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Real Kling API handlers
+// ---------------------------------------------------------------------------
+
+const KLING_BASE = 'https://api.klingai.com';
 
 function base64url(data: ArrayBuffer | string): string {
   const str =
@@ -19,7 +119,10 @@ function base64url(data: ArrayBuffer | string): string {
   return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-async function generateJWT(accessKey: string, secretKey: string): Promise<string> {
+async function generateJWT(
+  accessKey: string,
+  secretKey: string,
+): Promise<string> {
   const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const now = Math.floor(Date.now() / 1000);
   const payload = base64url(
@@ -45,32 +148,12 @@ async function generateJWT(accessKey: string, secretKey: string): Promise<string
   return `${signingInput}.${base64url(sig)}`;
 }
 
-// --- Issue 10: API Key Validation ---
-// Validates X-API-Key header against APP_API_KEY secret.
-// If APP_API_KEY is not configured, auth is skipped (local dev).
-// NOTE: This is a basic speed bump. For production, also add rate limiting
-// via Cloudflare's built-in rate limiting or Durable Objects.
-
-function validateApiKey(request: Request, env: Env): Response | null {
-  if (!env.APP_API_KEY) return null; // Auth not configured — skip
-  const key = request.headers.get('X-API-Key');
-  if (key !== env.APP_API_KEY) {
-    return Response.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  return null; // Auth passed
-}
-
-// --- Issue 11: Detect image MIME type and ensure data URI prefix ---
-
 function ensureDataUri(base64Image: string): string {
-  // Already has data URI prefix — return as-is
   if (base64Image.startsWith('data:')) {
     return base64Image;
   }
 
-  // Detect format from base64-decoded first bytes
-  // JPEG starts with /9j/ in base64 (0xFF 0xD8), PNG starts with iVBOR (0x89 0x50)
-  let mimeType = 'image/jpeg'; // Default to JPEG
+  let mimeType = 'image/jpeg';
   if (base64Image.startsWith('iVBOR')) {
     mimeType = 'image/png';
   } else if (base64Image.startsWith('R0lGOD')) {
@@ -82,18 +165,20 @@ function ensureDataUri(base64Image: string): string {
   return `data:${mimeType};base64,${base64Image}`;
 }
 
-// --- Route Handlers ---
-
-async function handleGenerate(request: Request, env: Env): Promise<Response> {
+async function handleGenerateReal(
+  request: Request,
+  env: Env,
+): Promise<Response> {
   const body = (await request.json()) as { image: string; prompt: string };
 
   if (!body.image || !body.prompt) {
-    return Response.json({ error: 'image and prompt required' }, { status: 400 });
+    return Response.json(
+      { error: 'image and prompt required' },
+      { status: 400 },
+    );
   }
 
-  const token = await generateJWT(env.KLING_ACCESS_KEY, env.KLING_SECRET_KEY);
-
-  // Issue 11 fix: Ensure the image has a data URI prefix for Kling API compatibility
+  const token = await generateJWT(env.KLING_ACCESS_KEY!, env.KLING_SECRET_KEY!);
   const imageData = ensureDataUri(body.image);
 
   const klingResponse = await fetch(`${KLING_BASE}/v1/videos/image2video`, {
@@ -136,8 +221,11 @@ async function handleGenerate(request: Request, env: Env): Promise<Response> {
   return Response.json({ taskId: result.data.task_id });
 }
 
-async function handleStatus(taskId: string, env: Env): Promise<Response> {
-  const token = await generateJWT(env.KLING_ACCESS_KEY, env.KLING_SECRET_KEY);
+async function handleStatusReal(
+  taskId: string,
+  env: Env,
+): Promise<Response> {
+  const token = await generateJWT(env.KLING_ACCESS_KEY!, env.KLING_SECRET_KEY!);
 
   const klingResponse = await fetch(
     `${KLING_BASE}/v1/videos/image2video/${taskId}`,
@@ -161,7 +249,6 @@ async function handleStatus(taskId: string, env: Env): Promise<Response> {
   const status = result.data?.task_status ?? 'unknown';
   const videoUrl = result.data?.task_result?.videos?.[0]?.url;
 
-  // Map Kling statuses to our simple ones
   let simpleStatus: string;
   switch (status) {
     case 'succeed':
@@ -180,13 +267,25 @@ async function handleStatus(taskId: string, env: Env): Promise<Response> {
   });
 }
 
-// --- Worker Entry ---
+// ---------------------------------------------------------------------------
+// API Key Validation
+// ---------------------------------------------------------------------------
+
+function validateApiKey(request: Request, env: Env): Response | null {
+  if (!env.APP_API_KEY) return null;
+  const key = request.headers.get('X-API-Key');
+  if (key !== env.APP_API_KEY) {
+    return Response.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Worker Entry
+// ---------------------------------------------------------------------------
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // CORS headers — kept permissive because the primary client is a native
-    // mobile app (CORS is a browser-only concept). The X-API-Key header is
-    // the actual access control mechanism.
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -198,25 +297,39 @@ export default {
     }
 
     const url = new URL(request.url);
+    const dummy = isDummyMode(env);
+    const workerOrigin = url.origin;
 
     let response: Response;
 
     try {
-      // Issue 10: Validate API key before processing any route
       const authError = validateApiKey(request, env);
+
       if (authError) {
         response = authError;
       } else if (url.pathname === '/generate' && request.method === 'POST') {
-        response = await handleGenerate(request, env);
+        response = dummy
+          ? await handleGenerateDummy(request)
+          : await handleGenerateReal(request, env);
       } else if (url.pathname.startsWith('/status/')) {
         const taskId = url.pathname.split('/status/')[1];
         if (!taskId) {
-          response = Response.json({ error: 'taskId required' }, { status: 400 });
+          response = Response.json(
+            { error: 'taskId required' },
+            { status: 400 },
+          );
         } else {
-          response = await handleStatus(taskId, env);
+          response = dummy
+            ? handleStatusDummy(taskId, workerOrigin)
+            : await handleStatusReal(taskId, env);
         }
+      } else if (url.pathname === '/dummy-video' && dummy) {
+        response = await handleDummyVideo();
       } else {
-        response = Response.json({ status: 'opendance worker running' });
+        response = Response.json({
+          status: 'opendance worker running',
+          mode: dummy ? 'dummy' : 'live',
+        });
       }
     } catch (err) {
       response = Response.json(
