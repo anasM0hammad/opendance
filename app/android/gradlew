@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# Ensure node is on PATH for Android Studio (macOS GUI apps don't inherit shell PATH)
+export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
+
 #
 # Copyright © 2015-2021 the original authors.
 #

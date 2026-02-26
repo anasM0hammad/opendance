@@ -1,0 +1,62 @@
+diff --git a/node_modules/expo-modules-core/expo-module-gradle-plugin/src/main/kotlin/expo/modules/plugin/ProjectConfiguration.kt b/node_modules/expo-modules-core/expo-module-gradle-plugin/src/main/kotlin/expo/modules/plugin/ProjectConfiguration.kt
+index 7c22069..c34def6 100644
+--- a/node_modules/expo-modules-core/expo-module-gradle-plugin/src/main/kotlin/expo/modules/plugin/ProjectConfiguration.kt
++++ b/node_modules/expo-modules-core/expo-module-gradle-plugin/src/main/kotlin/expo/modules/plugin/ProjectConfiguration.kt
+@@ -78,6 +78,12 @@ internal fun Project.applyPublishing(expoModulesExtension: ExpoModuleExtension)
+     .applyPublishingVariant()
+ 
+   afterEvaluate {
++    if (!expoModulesExtension.canBePublished) {
++      createEmptyExpoPublishTask()
++      createEmptyExpoPublishToMavenLocalTask()
++      return@afterEvaluate
++    }
++
+     val publicationInfo = PublicationInfo(this)
+ 
+     publishingExtension()
+diff --git a/node_modules/expo-modules-core/expo-module-gradle-plugin/src/main/kotlin/expo/modules/plugin/android/MavenPublicationExtension.kt b/node_modules/expo-modules-core/expo-module-gradle-plugin/src/main/kotlin/expo/modules/plugin/android/MavenPublicationExtension.kt
+index 951fd97..7433894 100644
+--- a/node_modules/expo-modules-core/expo-module-gradle-plugin/src/main/kotlin/expo/modules/plugin/android/MavenPublicationExtension.kt
++++ b/node_modules/expo-modules-core/expo-module-gradle-plugin/src/main/kotlin/expo/modules/plugin/android/MavenPublicationExtension.kt
+@@ -27,7 +27,7 @@ import kotlin.io.path.exists
+ import kotlin.io.path.toPath
+ 
+ internal data class PublicationInfo(
+-  val components: SoftwareComponent,
++  val components: SoftwareComponent?,
+   val groupId: String,
+   val artifactId: String,
+   val version: String,
+@@ -35,7 +35,7 @@ internal data class PublicationInfo(
+   constructor(
+     project: Project,
+   ) : this(
+-    components = project.components.getByName("release"),
++    components = project.components.findByName("release"),
+     groupId = project.group.toString(),
+     artifactId = requireNotNull(project.androidLibraryExtension().namespace) {
+       "'android.namespace' is not defined"
+@@ -61,7 +61,7 @@ internal data class PublicationInfo(
+ internal fun PublicationContainer.createReleasePublication(publicationInfo: PublicationInfo) {
+   create("release", MavenPublication::class.java) { mavenPublication ->
+     with(mavenPublication) {
+-      from(publicationInfo.components)
++      publicationInfo.components?.let { from(it) }
+       groupId = publicationInfo.groupId
+       artifactId = publicationInfo.artifactId
+       version = publicationInfo.version
+diff --git a/node_modules/expo-modules-core/expo-module-gradle-plugin/src/main/kotlin/expo/modules/plugin/gradle/ExpoGradleHelperExtension.kt b/node_modules/expo-modules-core/expo-module-gradle-plugin/src/main/kotlin/expo/modules/plugin/gradle/ExpoGradleHelperExtension.kt
+index 7c387ab..bdc4908 100644
+--- a/node_modules/expo-modules-core/expo-module-gradle-plugin/src/main/kotlin/expo/modules/plugin/gradle/ExpoGradleHelperExtension.kt
++++ b/node_modules/expo-modules-core/expo-module-gradle-plugin/src/main/kotlin/expo/modules/plugin/gradle/ExpoGradleHelperExtension.kt
+@@ -43,7 +43,8 @@ open class ExpoGradleHelperExtension {
+     reactNativeDir = reactNativeDirFromSource ?: File(
+       project.providers.exec { env ->
+         env.workingDir(project.rootDir)
+-        env.commandLine("node", "--print", "require.resolve('react-native/package.json')")
++        val nodeBinary = project.findProperty("expo.nodeExecutable")?.toString() ?: "/usr/local/bin/node"
++        env.commandLine(nodeBinary, "--print", "require.resolve('react-native/package.json')")
+       }.standardOutput.asText.get().trim()
+     ).parentFile
+ 

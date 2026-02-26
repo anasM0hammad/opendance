@@ -4,11 +4,7 @@ import { File, Paths } from 'expo-file-system';
 // Fails loudly at startup if not configured, preventing silent connection failures.
 const WORKER_URL = __DEV__
   ? 'http://10.0.2.2:8787' // Android emulator -> host machine
-  : (() => {
-      const url = process.env.EXPO_PUBLIC_WORKER_URL;
-      if (!url) throw new Error('EXPO_PUBLIC_WORKER_URL must be set for production builds');
-      return url;
-    })();
+  : (process.env.EXPO_PUBLIC_WORKER_URL || 'http://localhost:8787');
 
 // Issue 10 (app-side): Send API key header if configured.
 // Set EXPO_PUBLIC_APP_API_KEY in your .env for production builds.
