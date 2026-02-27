@@ -353,3 +353,70 @@ This project uses Expo SDK 54, which introduces a **new class-based API for `exp
 - `new File(Paths.cache, filename)` — creates a file reference in the cache directory
 
 The legacy API (`FileSystem.readAsStringAsync`, `FileSystem.cacheDirectory`, etc.) is still available at `expo-file-system/legacy` but is not used in this project.
+
+## Local Build & Install (Production Release APK)
+
+Build a standalone release APK that runs independently on your device — no Metro bundler needed.
+
+### One-liner (build + install)
+```bash
+cd app/android && ./gradlew assembleRelease && adb install -r app/build/outputs/apk/release/app-release.apk
+```
+
+### Step by step
+
+**1. Generate the native android project (if not already done or after adding new native modules):**
+```bash
+cd app
+npx expo prebuild --platform android
+```
+
+**2. Build the release APK:**
+```bash
+cd app/android
+./gradlew assembleRelease
+```
+The JS bundle is automatically bundled inside the APK. No Metro required at runtime.
+
+The APK will be at: `app/android/app/build/outputs/apk/release/app-release.apk`
+
+**3. Install on device via ADB:**
+```bash
+adb install -r app/android/app/build/outputs/apk/release/app-release.apk
+```
+The `-r` flag replaces an existing install, keeping app data.
+
+> **Note:** If install fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE` (signing key mismatch), uninstall first:
+> ```bash
+> adb uninstall com.anonymous.app
+> ```
+> Then run the install command again.
+
+**4. Launch the app:**
+```bash
+adb shell am start -n com.anonymous.app/.MainActivity
+```
+
+### Useful commands
+
+| Command | Purpose |
+|---------|---------|
+| `./gradlew assembleRelease` | Build release APK (JS bundled in, no Metro needed) |
+| `./gradlew assembleDebug` | Build debug APK (needs Metro running) |
+| `./gradlew clean` | Clean build artifacts before a fresh build |
+| `adb devices` | List connected devices/emulators |
+| `adb logcat -s ReactNativeJS:V` | View React Native JS logs |
+| `adb uninstall com.anonymous.app` | Fully uninstall the app |
+
+### Notes
+- The release build uses the default debug signing key — fine for local testing, not for Play Store.
+- Run `npx expo prebuild --platform android` again after adding/removing any Expo native module.
+- Make sure `ANDROID_HOME` is set and `adb` / `gradle` are on your `PATH`.
+- For a clean rebuild: `cd app/android && ./gradlew clean && ./gradlew assembleRelease`
+- For opening Android studio directly `open -a "Android Studio"`
+
+## Switch to Kling API
+`npx wrangler secret put KLING_ACCESS_KEY`
+`npx wrangler secret put KLING_SECRET_KEY`
+`npx wrangler deploy`
+

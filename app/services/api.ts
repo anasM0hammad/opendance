@@ -1,10 +1,9 @@
 import { File, Paths } from 'expo-file-system';
 
-// Issue 15 fix: Use EXPO_PUBLIC_WORKER_URL env var for production builds.
-// Fails loudly at startup if not configured, preventing silent connection failures.
-const WORKER_URL = __DEV__
-  ? 'http://10.0.2.2:8787' // Android emulator -> host machine
-  : (process.env.EXPO_PUBLIC_WORKER_URL || 'http://localhost:8787');
+// Use EXPO_PUBLIC_WORKER_URL if set (works in both dev and production).
+// Falls back to Android emulator localhost proxy in dev, localhost in prod.
+const WORKER_URL = process.env.EXPO_PUBLIC_WORKER_URL
+  || (__DEV__ ? 'http://10.0.2.2:8787' : 'http://localhost:8787');
 
 // Issue 10 (app-side): Send API key header if configured.
 // Set EXPO_PUBLIC_APP_API_KEY in your .env for production builds.
