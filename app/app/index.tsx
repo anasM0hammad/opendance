@@ -26,10 +26,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { useClipStore, type Phase } from '../store/useClipStore';
 import { generateVideo, pollUntilDone, downloadVideo } from '../services/api';
 
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const MAX_CLIPS = 5;
 
 // ---------------------------------------------------------------------------
-// Custom Modal (replaces system Alert)
+// Custom Modal
 // ---------------------------------------------------------------------------
 type ModalButton = {
   text: string;
@@ -114,33 +115,21 @@ const modalStyles = StyleSheet.create({
     marginBottom: 22,
     lineHeight: 20,
   },
-  buttonRow: {
-    gap: 10,
-  },
+  buttonRow: { gap: 10 },
   button: {
     backgroundColor: '#6432ff',
     paddingVertical: 14,
     borderRadius: 14,
     alignItems: 'center',
   },
-  buttonDestructive: {
-    backgroundColor: '#ff3b30',
-  },
-  buttonCancel: {
-    backgroundColor: '#333',
-  },
-  buttonText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  buttonTextCancel: {
-    color: '#aaa',
-  },
+  buttonDestructive: { backgroundColor: '#ff3b30' },
+  buttonCancel: { backgroundColor: '#333' },
+  buttonText: { color: '#fff', fontSize: 15, fontWeight: '600' },
+  buttonTextCancel: { color: '#aaa' },
 });
 
 // ---------------------------------------------------------------------------
-// Indeterminate Progress Bar
+// Progress Bar
 // ---------------------------------------------------------------------------
 function ProgressBar() {
   const anim = useRef(new Animated.Value(0)).current;
@@ -197,7 +186,7 @@ const progressStyles = StyleSheet.create({
 });
 
 // ---------------------------------------------------------------------------
-// Back Button Component
+// Back Button
 // ---------------------------------------------------------------------------
 function BackButton({
   onPress,
@@ -232,6 +221,7 @@ export default function MainScreen() {
   const [currentPlayingIndex, setCurrentPlayingIndex] = useState(0);
   const [playbackKey, setPlaybackKey] = useState(0);
   const [cameraReady, setCameraReady] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(true);
   const [modal, setModal] = useState<ModalState>({
     visible: false,
     title: '',
@@ -251,7 +241,8 @@ export default function MainScreen() {
     reset,
   } = useClipStore();
 
-  const hasDoneClips = clips.filter((c) => c.status === 'done').length > 0;
+  const doneClips = clips.filter((c) => c.status === 'done' && c.videoUri);
+  const hasDoneClips = doneClips.length > 0;
 
   // ---- Helpers ----
 
@@ -361,6 +352,7 @@ export default function MainScreen() {
         .getState()
         .clips.filter((c) => c.status === 'done');
       setCurrentPlayingIndex(latestDoneClips.length - 1);
+      setIsPlaying(true);
       setPhase('preview');
     } catch (error) {
       updateClip(clipId, { status: 'failed' });
@@ -399,6 +391,22 @@ export default function MainScreen() {
     setPhase('prompt');
   }, []);
 
+  const togglePlayPause = useCallback(async () => {
+    if (!videoRef.current) return;
+    try {
+      const status = await videoRef.current.getStatusAsync();
+      if (status.isLoaded) {
+        if (status.isPlaying) {
+          await videoRef.current.pauseAsync();
+          setIsPlaying(false);
+        } else {
+          await videoRef.current.playAsync();
+          setIsPlaying(true);
+        }
+      }
+    } catch {}
+  }, []);
+
   const saveClipToGallery = useCallback(
     async (videoUri: string) => {
       const { status } = await MediaLibrary.requestPermissionsAsync();
@@ -418,16 +426,44 @@ export default function MainScreen() {
     [showModal],
   );
 
-  const onVideoEnd = useCallback(() => {
-    const doneClips = clips.filter((c) => c.status === 'done');
-    if (currentPlayingIndex < doneClips.length - 1) {
-      setCurrentPlayingIndex(currentPlayingIndex + 1);
+  const saveAllClips = useCallback(async () => {
+    const { status } = await MediaLibrary.requestPermissionsAsync();
+    if (status !== 'granted') {
+      showModal(
+        'Permission Needed',
+        'Grant media library access to save videos.',
+        [{ text: 'OK', onPress: () => {}, style: 'default' }],
+      );
+      return;
     }
-  }, [clips, currentPlayingIndex]);
+    for (const clip of doneClips) {
+      if (clip.videoUri) {
+        await MediaLibrary.saveToLibraryAsync(clip.videoUri);
+      }
+    }
+    showModal(
+      'Saved!',
+      `${doneClips.length} clip${doneClips.length > 1 ? 's' : ''} saved to gallery.`,
+      [{ text: 'Great', onPress: () => {}, style: 'default' }],
+    );
+  }, [doneClips, showModal]);
 
-  const playAll = useCallback(() => {
+  const handlePreviewBack = useCallback(() => {
+    showModal(
+      'Leave Sequence?',
+      'This will discard all clips. Do you want to continue?',
+      [
+        { text: 'Stay', onPress: () => {}, style: 'cancel' },
+        { text: 'Leave', onPress: () => reset(), style: 'destructive' },
+      ],
+    );
+  }, [showModal, reset]);
+
+  const handleDone = useCallback(() => {
     setCurrentPlayingIndex(0);
     setPlaybackKey((k) => k + 1);
+    setIsPlaying(true);
+    setPhase('finalPlayback');
   }, []);
 
   // ---- Back / hardware back ----
@@ -438,7 +474,7 @@ export default function MainScreen() {
         setPhase('preview');
         return true;
       }
-      return false; // let Android exit the app
+      return false;
     }
 
     if (phase === 'prompt') {
@@ -476,9 +512,19 @@ export default function MainScreen() {
       return true;
     }
 
-    // Preview: let default handler work
+    if (phase === 'preview') {
+      handlePreviewBack();
+      return true;
+    }
+
+    if (phase === 'finalPlayback') {
+      setIsPlaying(true);
+      setPhase('preview');
+      return true;
+    }
+
     return false;
-  }, [phase, hasDoneClips, prompt, showModal, cancelGeneration]);
+  }, [phase, hasDoneClips, prompt, showModal, cancelGeneration, handlePreviewBack]);
 
   useEffect(() => {
     const sub = BackHandler.addEventListener(
@@ -523,7 +569,6 @@ export default function MainScreen() {
           facing={cameraFacing}
           onCameraReady={() => setCameraReady(true)}
         >
-          {/* Loading overlay while camera initialises */}
           {!cameraReady && (
             <View style={styles.cameraLoading}>
               <ActivityIndicator size="large" color="#fff" />
@@ -531,7 +576,6 @@ export default function MainScreen() {
             </View>
           )}
 
-          {/* Top bar: optional back button + centered title */}
           <SafeAreaView style={styles.cameraTopBar}>
             <View style={styles.cameraTopBarInner}>
               {hasDoneClips ? (
@@ -550,12 +594,10 @@ export default function MainScreen() {
                   ? 'Capture your first scene'
                   : 'Capture next scene'}
               </Text>
-              {/* Right spacer to balance the back button */}
               <View style={styles.cameraTopBtnSpacer} />
             </View>
           </SafeAreaView>
 
-          {/* Last frame floating chip above controls */}
           {getLastClip()?.lastFrameUri && (
             <View style={styles.lastFrameFloatingRow}>
               <TouchableOpacity
@@ -576,7 +618,6 @@ export default function MainScreen() {
             </View>
           )}
 
-          {/* Bottom controls: Gallery | Capture | Flip */}
           <View style={styles.cameraControls}>
             <TouchableOpacity
               style={styles.galleryBtn}
@@ -603,8 +644,7 @@ export default function MainScreen() {
   // ---- Prompt Phase ----
   if (phase === 'prompt') {
     const lastClip = getLastClip();
-    const isFirstClip =
-      clips.filter((c) => c.status === 'done').length === 0;
+    const isFirstClip = doneClips.length === 0;
     const usingLastFrame =
       !isFirstClip && selectedImageUri === lastClip?.lastFrameUri;
 
@@ -613,7 +653,6 @@ export default function MainScreen() {
         style={styles.container}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
-        {/* Image — takes remaining space */}
         <View style={styles.promptImageSection}>
           {selectedImageUri && (
             <Image
@@ -623,7 +662,6 @@ export default function MainScreen() {
             />
           )}
 
-          {/* Back button */}
           <BackButton
             onPress={() => handleBackPress()}
             topOffset={backBtnTop}
@@ -635,7 +673,6 @@ export default function MainScreen() {
             </View>
           )}
 
-          {/* Overlay option chips on the image — well above the bottom section */}
           <View style={styles.imageOptionsOverlay}>
             <TouchableOpacity
               style={styles.imageOptionBtn}
@@ -685,12 +722,11 @@ export default function MainScreen() {
           </View>
         </View>
 
-        {/* Bottom — prompt text area + generate button */}
         <View style={styles.promptBottomSection}>
           <Text style={styles.promptTitle}>
             {isFirstClip
               ? 'Describe the scene'
-              : `Clip ${clips.filter((c) => c.status === 'done').length + 1}`}
+              : `Clip ${doneClips.length + 1}`}
           </Text>
 
           {!isFirstClip && lastClip?.prompt ? (
@@ -730,7 +766,6 @@ export default function MainScreen() {
   if (phase === 'generating') {
     return (
       <View style={styles.container}>
-        {/* Full-screen image background */}
         {selectedImageUri && (
           <Image
             source={{ uri: selectedImageUri }}
@@ -739,15 +774,12 @@ export default function MainScreen() {
           />
         )}
 
-        {/* Semi-transparent overlay */}
         <View style={styles.genOverlay}>
-          {/* Back / cancel button top-left */}
           <BackButton
             onPress={() => handleBackPress()}
             topOffset={backBtnTop}
           />
 
-          {/* Centered progress info */}
           <View style={styles.genCenter}>
             <Text style={styles.genStatusText}>{genStatus}</Text>
             <ProgressBar />
@@ -756,7 +788,6 @@ export default function MainScreen() {
             </Text>
           </View>
 
-          {/* Cancel button at bottom */}
           <SafeAreaView style={styles.genBottom}>
             <TouchableOpacity
               style={styles.genCancelBtn}
@@ -773,134 +804,241 @@ export default function MainScreen() {
     );
   }
 
+  // ---- Final Playback Phase ----
+  if (phase === 'finalPlayback') {
+    const currentClip = doneClips[currentPlayingIndex];
+
+    return (
+      <View style={styles.container}>
+        {/* Video fills most of the screen */}
+        <SafeAreaView style={styles.fpContainer}>
+          {/* Top bar */}
+          <View style={styles.fpTopBar}>
+            <TouchableOpacity
+              style={styles.pvTopBtn}
+              onPress={() => {
+                setIsPlaying(true);
+                setPhase('preview');
+              }}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="chevron-back" size={22} color="#fff" />
+            </TouchableOpacity>
+            <Text style={styles.fpTitle}>Final Preview</Text>
+            <TouchableOpacity
+              style={styles.pvTopBtn}
+              onPress={saveAllClips}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="arrow-down" size={22} color="#fff" />
+            </TouchableOpacity>
+          </View>
+
+          {/* Video player */}
+          <View style={styles.fpVideoContainer}>
+            {currentClip?.videoUri && (
+              <TouchableOpacity
+                activeOpacity={1}
+                onPress={togglePlayPause}
+                style={styles.fpVideoTouchable}
+              >
+                <Video
+                  key={`fp-${currentClip.id}-${playbackKey}`}
+                  ref={videoRef}
+                  source={{ uri: currentClip.videoUri }}
+                  style={styles.fpVideo}
+                  resizeMode={'contain' as any}
+                  shouldPlay
+                  onPlaybackStatusUpdate={(status) => {
+                    if (status.isLoaded) {
+                      if (status.didJustFinish) {
+                        const nextIdx = currentPlayingIndex + 1;
+                        if (nextIdx >= doneClips.length) {
+                          setCurrentPlayingIndex(0);
+                        } else {
+                          setCurrentPlayingIndex(nextIdx);
+                        }
+                        setPlaybackKey((k) => k + 1);
+                      }
+                      setIsPlaying(status.isPlaying);
+                    }
+                  }}
+                />
+                {!isPlaying && (
+                  <View style={styles.fpPauseOverlay}>
+                    <Ionicons name="play" size={56} color="rgba(255,255,255,0.8)" />
+                  </View>
+                )}
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {/* Progress */}
+          <View style={styles.fpBottom}>
+            <Text style={styles.fpProgressText}>
+              Playing clip {currentPlayingIndex + 1} of {doneClips.length}
+            </Text>
+            {/* Dot indicators */}
+            <View style={styles.fpDots}>
+              {doneClips.map((_, i) => (
+                <View
+                  key={i}
+                  style={[
+                    styles.fpDot,
+                    i === currentPlayingIndex && styles.fpDotActive,
+                  ]}
+                />
+              ))}
+            </View>
+          </View>
+        </SafeAreaView>
+
+        <CustomModal modal={modal} onClose={hideModal} />
+      </View>
+    );
+  }
+
   // ---- Preview Phase ----
-  const doneClips = clips.filter((c) => c.status === 'done' && c.videoUri);
   const currentClip = doneClips[currentPlayingIndex];
 
   return (
     <View style={styles.container}>
-      {/* Full-screen video */}
-      {currentClip?.videoUri && (
-        <Video
-          key={`${currentClip.id}-${playbackKey}`}
-          ref={videoRef}
-          source={{ uri: currentClip.videoUri }}
-          style={styles.fullScreenMedia}
-          resizeMode={'cover' as any}
-          shouldPlay
-          isLooping
-          onPlaybackStatusUpdate={(status) => {
-            if (status.isLoaded && status.didJustFinish) {
-              onVideoEnd();
-            }
-          }}
-        />
-      )}
+      <SafeAreaView style={styles.pvContainer}>
+        {/* Top bar: back | counter | done */}
+        <View style={styles.pvTopBar}>
+          <TouchableOpacity
+            style={styles.pvTopBtn}
+            onPress={handlePreviewBack}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="chevron-back" size={22} color="#fff" />
+          </TouchableOpacity>
 
-      {/* Overlay controls */}
-      <View style={styles.previewOverlay}>
-        {/* Top */}
-        <SafeAreaView style={styles.previewTop}>
-          {doneClips.length > 1 && (
-            <View style={styles.clipCounterPill}>
-              <Text style={styles.clipCounterText}>
-                Clip {currentPlayingIndex + 1} of {doneClips.length}
-              </Text>
-            </View>
+          <Text style={styles.pvCounterText}>
+            Clip {currentPlayingIndex + 1} of {doneClips.length}
+          </Text>
+
+          <TouchableOpacity
+            style={styles.pvDoneBtn}
+            onPress={handleDone}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="checkmark" size={22} color="#fff" />
+          </TouchableOpacity>
+        </View>
+
+        {/* Video player */}
+        <View style={styles.pvVideoContainer}>
+          {currentClip?.videoUri && (
+            <TouchableOpacity
+              activeOpacity={1}
+              onPress={togglePlayPause}
+              style={styles.pvVideoTouchable}
+            >
+              <Video
+                key={`pv-${currentClip.id}-${playbackKey}`}
+                ref={videoRef}
+                source={{ uri: currentClip.videoUri }}
+                style={styles.pvVideo}
+                resizeMode={'contain' as any}
+                shouldPlay
+                isLooping
+                onPlaybackStatusUpdate={(status) => {
+                  if (status.isLoaded) {
+                    setIsPlaying(status.isPlaying);
+                  }
+                }}
+              />
+              {!isPlaying && (
+                <View style={styles.pvPauseOverlay}>
+                  <Ionicons name="play" size={48} color="rgba(255,255,255,0.8)" />
+                </View>
+              )}
+            </TouchableOpacity>
           )}
-        </SafeAreaView>
+        </View>
 
-        {/* Thumbnail strip (only when > 1 clip) */}
+        {/* Thumbnail strip */}
         {doneClips.length > 1 && (
           <ScrollView
             horizontal
-            style={styles.thumbnailStrip}
-            contentContainerStyle={styles.thumbnailStripContent}
+            style={styles.pvThumbnailStrip}
+            contentContainerStyle={styles.pvThumbnailStripContent}
             showsHorizontalScrollIndicator={false}
           >
             {doneClips.map((clip, idx) => (
               <TouchableOpacity
                 key={clip.id}
-                onPress={() => setCurrentPlayingIndex(idx)}
+                onPress={() => {
+                  setCurrentPlayingIndex(idx);
+                  setIsPlaying(true);
+                  setPlaybackKey((k) => k + 1);
+                }}
                 style={[
-                  styles.thumbnail,
-                  idx === currentPlayingIndex && styles.thumbnailActive,
+                  styles.pvThumb,
+                  idx === currentPlayingIndex && styles.pvThumbActive,
                 ]}
               >
                 <Image
                   source={{ uri: clip.imageUri }}
-                  style={styles.thumbnailImage}
+                  style={styles.pvThumbImage}
                 />
-                <Text style={styles.thumbnailLabel}>{idx + 1}</Text>
+                <Text style={styles.pvThumbLabel}>{idx + 1}</Text>
               </TouchableOpacity>
             ))}
           </ScrollView>
         )}
 
-        {/* Bottom action buttons */}
-        <SafeAreaView style={styles.previewBottom}>
-          <View style={styles.previewBottomInner}>
-            {/* Primary row */}
-            <View style={styles.previewPrimaryRow}>
-              <TouchableOpacity
-                style={styles.previewRetryBtn}
-                onPress={handleRetry}
-              >
-                <Text style={styles.previewRetryBtnText}>Retry</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.previewNextBtn}
-                onPress={handleAddNextClip}
-              >
-                <Text style={styles.previewNextBtnText}>+ Next Scene</Text>
-              </TouchableOpacity>
-            </View>
+        {/* Play/pause control */}
+        <View style={styles.pvControlBar}>
+          <TouchableOpacity
+            style={styles.pvPlayPauseBtn}
+            onPress={togglePlayPause}
+            activeOpacity={0.7}
+          >
+            <Ionicons
+              name={isPlaying ? 'pause' : 'play'}
+              size={24}
+              color="#fff"
+            />
+          </TouchableOpacity>
+        </View>
 
-            {/* Secondary row */}
-            <View style={styles.previewSecondaryRow}>
-              {doneClips.length > 1 && (
-                <TouchableOpacity
-                  style={styles.previewSecBtn}
-                  onPress={playAll}
-                >
-                  <Text style={styles.previewSecBtnText}>Play All</Text>
-                </TouchableOpacity>
-              )}
-              {currentClip?.videoUri && (
-                <TouchableOpacity
-                  style={styles.previewSecBtn}
-                  onPress={() => saveClipToGallery(currentClip.videoUri!)}
-                >
-                  <Text style={styles.previewSecBtnText}>Save</Text>
-                </TouchableOpacity>
-              )}
-              <TouchableOpacity
-                style={styles.previewSecBtn}
-                onPress={() => {
-                  showModal(
-                    'Start Over',
-                    'This will clear all clips. Are you sure?',
-                    [
-                      {
-                        text: 'Cancel',
-                        onPress: () => {},
-                        style: 'cancel',
-                      },
-                      {
-                        text: 'Start Over',
-                        onPress: () => reset(),
-                        style: 'destructive',
-                      },
-                    ],
-                  );
-                }}
-              >
-                <Text style={styles.previewStartOverText}>Start Over</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </SafeAreaView>
-      </View>
+        {/* Action buttons: retry | append | save */}
+        <View style={styles.pvActionRow}>
+          <TouchableOpacity
+            style={styles.pvActionBtn}
+            onPress={handleRetry}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="refresh" size={22} color="#fff" />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.pvActionBtn,
+              styles.pvActionBtnAccent,
+              doneClips.length >= MAX_CLIPS && styles.pvActionBtnDisabled,
+            ]}
+            onPress={handleAddNextClip}
+            disabled={doneClips.length >= MAX_CLIPS}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="add" size={26} color="#fff" />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.pvActionBtn}
+            onPress={() =>
+              currentClip?.videoUri &&
+              saveClipToGallery(currentClip.videoUri)
+            }
+            activeOpacity={0.7}
+          >
+            <Ionicons name="arrow-down" size={22} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
 
       <CustomModal modal={modal} onClose={hideModal} />
     </View>
@@ -913,18 +1051,13 @@ export default function MainScreen() {
 
 const styles = StyleSheet.create({
   // -- Shared --
-  container: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
+  container: { flex: 1, backgroundColor: '#000' },
   centered: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     padding: 32,
   },
-
-  // -- Back button --
   backBtn: {
     position: 'absolute',
     left: 16,
@@ -937,7 +1070,7 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
 
-  // -- Permission screen --
+  // -- Permission --
   permissionTitle: {
     color: '#fff',
     fontSize: 22,
@@ -964,9 +1097,7 @@ const styles = StyleSheet.create({
   },
 
   // -- Camera --
-  camera: {
-    flex: 1,
-  },
+  camera: { flex: 1 },
   cameraLoading: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'center',
@@ -974,11 +1105,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.7)',
     zIndex: 10,
   },
-  cameraLoadingText: {
-    color: '#fff',
-    fontSize: 14,
-    marginTop: 12,
-  },
+  cameraLoadingText: { color: '#fff', fontSize: 14, marginTop: 12 },
   cameraTopBar: {
     position: 'absolute',
     top: 0,
@@ -1002,9 +1129,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     zIndex: 2,
   },
-  cameraTopBtnSpacer: {
-    width: 40,
-  },
+  cameraTopBtnSpacer: { width: 40 },
   cameraTitle: {
     flex: 1,
     color: '#fff',
@@ -1015,8 +1140,6 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 4,
   },
-
-  // Last frame floating chip (above camera controls)
   lastFrameFloatingRow: {
     position: 'absolute',
     bottom: 130,
@@ -1039,8 +1162,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
-
-  // Camera bottom controls
   cameraControls: {
     position: 'absolute',
     bottom: 40,
@@ -1074,11 +1195,7 @@ const styles = StyleSheet.create({
     minWidth: 64,
     alignItems: 'center',
   },
-  galleryBtnText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '500',
-  },
+  galleryBtnText: { color: '#fff', fontSize: 14, fontWeight: '500' },
   flipBtn: {
     width: 50,
     height: 50,
@@ -1089,14 +1206,8 @@ const styles = StyleSheet.create({
   },
 
   // -- Prompt --
-  promptImageSection: {
-    flex: 1,
-    backgroundColor: '#111',
-  },
-  promptImage: {
-    width: '100%',
-    height: '100%',
-  },
+  promptImageSection: { flex: 1, backgroundColor: '#111' },
+  promptImage: { width: '100%', height: '100%' },
   lastFrameBadge: {
     position: 'absolute',
     right: 16,
@@ -1105,11 +1216,7 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
     borderRadius: 14,
   },
-  lastFrameBadgeText: {
-    color: '#fff',
-    fontSize: 11,
-    fontWeight: '600',
-  },
+  lastFrameBadgeText: { color: '#fff', fontSize: 11, fontWeight: '600' },
   imageOptionsOverlay: {
     position: 'absolute',
     bottom: 30,
@@ -1134,11 +1241,7 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 4,
   },
-  imageOptionBtnText: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '600',
-  },
+  imageOptionBtnText: { color: '#fff', fontSize: 13, fontWeight: '600' },
   imageOptionBtnHighlight: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1201,14 +1304,8 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     alignItems: 'center',
   },
-  generateBtnDisabled: {
-    opacity: 0.35,
-  },
-  generateBtnText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-  },
+  generateBtnDisabled: { opacity: 0.35 },
+  generateBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
 
   // -- Generating --
   fullScreenMedia: {
@@ -1227,78 +1324,85 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 14,
   },
-  genStatusText: {
-    color: '#fff',
-    fontSize: 17,
-    fontWeight: '600',
-  },
-  genHintText: {
-    color: 'rgba(255,255,255,0.45)',
-    fontSize: 13,
-  },
-  genBottom: {
-    alignItems: 'center',
-    paddingBottom: 24,
-  },
+  genStatusText: { color: '#fff', fontSize: 17, fontWeight: '600' },
+  genHintText: { color: 'rgba(255,255,255,0.45)', fontSize: 13 },
+  genBottom: { alignItems: 'center', paddingBottom: 24 },
   genCancelBtn: {
     backgroundColor: 'rgba(255,255,255,0.14)',
     paddingHorizontal: 44,
     paddingVertical: 14,
     borderRadius: 26,
   },
-  genCancelBtnText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '600',
-  },
+  genCancelBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
 
   // -- Preview --
-  previewOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'space-between',
-  },
-  previewTop: {
+  pvContainer: { flex: 1, backgroundColor: '#000' },
+  pvTopBar: {
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingTop: 8,
-  },
-  clipCounterPill: {
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingVertical: 6,
+    paddingVertical: 10,
+  },
+  pvTopBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#1c1c1e',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  pvDoneBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#6432ff',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  pvCounterText: {
+    color: '#888',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  pvVideoContainer: {
+    flex: 1,
+    marginHorizontal: 12,
+    marginTop: 4,
     borderRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: '#111',
   },
-  clipCounterText: {
-    color: 'rgba(255,255,255,0.8)',
-    fontSize: 13,
-    fontWeight: '500',
+  pvVideoTouchable: { flex: 1 },
+  pvVideo: { width: '100%', height: '100%' },
+  pvPauseOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.3)',
   },
-  thumbnailStrip: {
-    position: 'absolute',
-    top: 100,
-    left: 0,
-    right: 0,
-    maxHeight: 54,
+  pvThumbnailStrip: {
+    marginTop: 12,
+    maxHeight: 52,
+    flexGrow: 0,
   },
-  thumbnailStripContent: {
+  pvThumbnailStripContent: {
     gap: 6,
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
   },
-  thumbnail: {
-    width: 48,
-    height: 48,
+  pvThumb: {
+    width: 46,
+    height: 46,
     borderRadius: 8,
     overflow: 'hidden',
     borderWidth: 2,
     borderColor: 'transparent',
   },
-  thumbnailActive: {
-    borderColor: '#6432ff',
-  },
-  thumbnailImage: {
-    width: '100%',
-    height: '100%',
-  },
-  thumbnailLabel: {
+  pvThumbActive: { borderColor: '#6432ff' },
+  pvThumbImage: { width: '100%', height: '100%' },
+  pvThumbLabel: {
     position: 'absolute',
     bottom: 1,
     right: 3,
@@ -1309,60 +1413,92 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
   },
-  previewBottom: {
-    paddingBottom: 8,
+  pvControlBar: {
+    alignItems: 'center',
+    paddingVertical: 12,
   },
-  previewBottomInner: {
-    paddingHorizontal: 16,
-    gap: 10,
+  pvPlayPauseBtn: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#1c1c1e',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#333',
   },
-  previewPrimaryRow: {
+  pvActionRow: {
     flexDirection: 'row',
-    gap: 10,
+    justifyContent: 'center',
+    gap: 24,
+    paddingBottom: 16,
   },
-  previewRetryBtn: {
-    flex: 1,
-    backgroundColor: 'rgba(255,255,255,0.14)',
-    paddingVertical: 15,
-    borderRadius: 16,
+  pvActionBtn: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#1c1c1e',
+    justifyContent: 'center',
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#333',
   },
-  previewRetryBtnText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  previewNextBtn: {
-    flex: 2,
+  pvActionBtnAccent: {
     backgroundColor: '#6432ff',
-    paddingVertical: 15,
-    borderRadius: 16,
-    alignItems: 'center',
+    borderColor: '#6432ff',
   },
-  previewNextBtnText: {
+  pvActionBtnDisabled: { opacity: 0.3 },
+
+  // -- Final Playback --
+  fpContainer: { flex: 1, backgroundColor: '#000' },
+  fpTopBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  fpTitle: {
     color: '#fff',
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: '700',
   },
-  previewSecondaryRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  previewSecBtn: {
+  fpVideoContainer: {
     flex: 1,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    paddingVertical: 11,
-    borderRadius: 14,
+    marginHorizontal: 8,
+    borderRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: '#111',
+  },
+  fpVideoTouchable: { flex: 1 },
+  fpVideo: { width: '100%', height: '100%' },
+  fpPauseOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
     alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.3)',
   },
-  previewSecBtnText: {
-    color: 'rgba(255,255,255,0.65)',
+  fpBottom: {
+    alignItems: 'center',
+    paddingVertical: 20,
+    gap: 10,
+  },
+  fpProgressText: {
+    color: '#888',
     fontSize: 13,
     fontWeight: '500',
   },
-  previewStartOverText: {
-    color: 'rgba(255,100,100,0.7)',
-    fontSize: 13,
-    fontWeight: '500',
+  fpDots: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  fpDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#333',
+  },
+  fpDotActive: {
+    backgroundColor: '#6432ff',
   },
 });
