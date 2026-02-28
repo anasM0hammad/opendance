@@ -989,21 +989,6 @@ export default function MainScreen() {
           </ScrollView>
         )}
 
-        {/* Play/pause control */}
-        <View style={styles.pvControlBar}>
-          <TouchableOpacity
-            style={styles.pvPlayPauseBtn}
-            onPress={togglePlayPause}
-            activeOpacity={0.7}
-          >
-            <Ionicons
-              name={isPlaying ? 'pause' : 'play'}
-              size={24}
-              color="#fff"
-            />
-          </TouchableOpacity>
-        </View>
-
         {/* Action buttons: retry | append | save */}
         <View style={styles.pvActionRow}>
           <TouchableOpacity
@@ -1412,20 +1397,6 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.8)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
-  },
-  pvControlBar: {
-    alignItems: 'center',
-    paddingVertical: 12,
-  },
-  pvPlayPauseBtn: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    backgroundColor: '#1c1c1e',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#333',
   },
   pvActionRow: {
     flexDirection: 'row',
