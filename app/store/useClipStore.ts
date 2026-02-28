@@ -15,7 +15,7 @@ export type Clip = {
   klingTaskId: string | null;
 };
 
-export type Phase = 'camera' | 'prompt' | 'generating' | 'preview';
+export type Phase = 'camera' | 'prompt' | 'generating' | 'preview' | 'finalPlayback';
 
 type ClipStore = {
   clips: Clip[];
